@@ -2,7 +2,6 @@
 import subprocess
 from pydbus import SystemBus
 import locale
-import os
 from shutil import which
 import sys
 import configparser
@@ -16,10 +15,6 @@ ENV = os.environ.copy()
 ENC = locale.getpreferredencoding()
 CONFIG = configparser.ConfigParser()
 
-
-print(CONFIG)
-
-# TODO make these uppercase
 BUS = SystemBus()
 OBJECT_MANAGER = BUS.get("org.bluez", "/")
 ADAPTER = None
@@ -263,7 +258,7 @@ def launch_gui():
 
     app = CONFIG.get("manager", "app", fallback="blueman-manager")
     gui = CONFIG.getboolean("manager", "gui", fallback=True)
-    print(gui)
+
     terminal = CONFIG.get("manager", "terminal", fallback="kitty")
 
     if not gui and not is_installed(terminal):
@@ -352,10 +347,7 @@ def main():
     global CONFIG
     parser = create_parser()
     args = parser.parse_args()
-    print(f"Using config file: {args.config}")
     CONFIG.read(os.path.expanduser(args.config))
-
-    print(CONFIG.get("dmenu", "command", fallback="walker"))
     run()
 
 
