@@ -1,5 +1,5 @@
 # bluetoothmanager-dmenu
-
+![alt text](demo.gif)
 
 # Requirements
 * pydbus
@@ -13,7 +13,6 @@ The script is tested on Arch, with python-pydbus.
 This is (and probably will always be) work in progress.
 
 I plan to add support for BLE (Airpods etc.) battery capabilities.
-
 
 # Configuration
 The `config.ini.example(default: blueman-manage1r)` file shows the default values bluetoothmanager-dmenu uses. If you are happy with the default configuration values, you do not need to create a `config.ini` file at all. The config path `bluetoothmanager-dmenu` checks is `$HOME/.config/bluetoothmanager-dmenu`. If you want to change the path you can do this by using the `--config / -c` arguments when launching.
