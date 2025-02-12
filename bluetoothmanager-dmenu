@@ -5,90 +5,168 @@ import locale
 import os
 from shutil import which
 import sys
+import configparser
+import argparse
+import os
 
+# Define the default config file path
+DEFAULT_CONFIG_PATH = "~/.config/bluetoothmanager-dmenu/config.ini"
 
 ENV = os.environ.copy()
 ENC = locale.getpreferredencoding()
+CONFIG = configparser.ConfigParser()
 
-bus = SystemBus()
-object_manager = bus.get("org.bluez", "/")
-adapter = None
-device = None
+
+print(CONFIG)
+
+# TODO make these uppercase
+BUS = SystemBus()
+OBJECT_MANAGER = BUS.get("org.bluez", "/")
+ADAPTER = None
+DEVICE = None
+
+
+class Action:
+    def __init__(self, name, function=None, args=None):
+        self.name = name
+        self.function = function
+        self.args = args
+    
+    def __str__(self):
+        return self.name
+
+    def __call__(self):
+        if self.function is None:
+            return
+
+        if self.args is None:
+            self.function()
+        else:
+            self.function(*self.args)
+    
+
+
 
 
 def create_dmenu_command(prompt):
-    commands = {
-        "walker": ["walker", "-n", "-d", "-k", '-p', str(prompt)]
-    }
-    return commands["walker"]
+    global CONFIG
+
+    dmenu_program = CONFIG.get("dmenu", "command", fallback="walker")
+    commands = [dmenu_program]
+
+    extended_arguments = CONFIG.get("dmenu", "arguments", fallback="-n -d -k").split(" ")
+    if len(extended_arguments) > 0:
+        commands.extend(extended_arguments)
+
+    prompt = str(prompt)
+    if len(prompt) == 0:
+        prompt = " "
+
+    config_prompt = CONFIG.get("dmenu", "prompt", fallback='-p')
+    commands.append(str(config_prompt))
+    commands.append(str(prompt))
+    return commands
 
 
-def fmt_device(name, connected):
-        return f"{'\t' if connected else ''}{name}"
+def run_command(prompt, input):
+    selection = subprocess.run(create_dmenu_command(prompt),
+                        capture_output=True,
+                        check=False,
+                        input=input,
+                        env=ENV,
+                        encoding=ENC).stdout
+    return selection.strip("\n")
 
 
-def notify_send(title, text):
+def get_spacing(character):
+    # 60 seems to be context dependent
+    if sys.getsizeof(character) > 42:
+        return "   "
+    return " "
+
+
+def fmt_device(device):
+    global CONFIG
+    connected_symbol = CONFIG.get("dmenu", "connected_symbol", fallback="")
+    battery_symbol = CONFIG.get("dmenu", "battery_symbol", fallback="󰥈")
+
+    name = device["device"].get("Alias")
+
+    connected_ind = ""
+    if device["device"].get("Connected", False):
+        connected_ind = f"{connected_symbol}{get_spacing(connected_symbol)}"
+    battery_lvl = ""
+    if device["battery"] is not None:
+        percentage = device["battery"].get("Percentage")
+        battery_lvl = f"\t({battery_symbol}{get_spacing(battery_symbol)}{percentage}%)"
+
+    return f"{connected_ind}{name}{battery_lvl}"
+
+
+def notify_send(title, text=""):
     subprocess.run(["notify-send", "-i", "bluetooth", "-c", "bluetooth", title, text], capture_output=False, check=False, env=ENV, encoding=ENC)
 
 
-def toggle_connection(device):
-    if device.Connected:
-        device.Disconnect()
+def toggle_connection(name):
+    global DEVICE
+    if DEVICE.Connected:
+        DEVICE.Disconnect()
         return
     
     try: 
-        device.Connect()
+        DEVICE.Connect()
     except: 
-        name = device.Alias if device.Alias is not None else device.Address
         notify_send(name, "Failed to connect")
+
+
+def remove_device(name, device_path):
+    global ADAPTER
+    
+    try:
+        ADAPTER.RemoveDevice(device_path)
+    except:
+        notify_send(f"Failed to remove device {name}")
 
 
 def is_installed(command):
     return which(command) is not None
 
 
-def show_device_menu():
-    global device, adapter
-
-    prompt = device.Alias if device.Alias is not None else device.Address
-    connected = f"Connected: {'yes' if device.Connected else 'no'}"
-    trusted = f"Trusted: {'yes' if device.Trusted else 'no'}"
+def show_device_menu(device_path):
+    global DEVICE, ADAPTER
+    DEVICE = BUS.get("org.bluez", device_path)
+    name = DEVICE.Alias if DEVICE.Alias is not None else DEVICE.Address
+    connected = f"Connected: {'yes' if DEVICE.Connected else 'no'}"
+    trusted = f"Trusted: {'yes' if DEVICE.Trusted else 'no'}"
 
     dmenu_input = f"{connected}\n{trusted}\n\nRemove\nBack\n"
-    selection = subprocess.run(create_dmenu_command(prompt),
-                    capture_output=True,
-                    check=False,
-                    input=dmenu_input,
-                    env=ENV,
-                    encoding=ENC).stdout
-
-    selection = selection.strip()
+    selection = run_command(name, dmenu_input)
 
     # just stay in the main loop
     if selection == "Back":
         return
 
     if selection == connected:
-        toggle_connection(device)
+        toggle_connection(name)
     elif selection == trusted:
-        device.Trusted = not device.Trusted
-        notify_send(f"Bluetooth Device Trusted" if device.Trusted else f"Bluetooth Device Untrusted", prompt)
+        DEVICE.Trusted = not DEVICE.Trusted
+        notify_send(f"Bluetooth Device Trusted" if DEVICE.Trusted else f"Bluetooth Device Untrusted", name)
     elif selection == "Remove":
-        adapter.RemoveDevice(device._path)
+        remove_device(name, device_path)
 
 
 def get_devices(only_discovered=False):
-    """Returns a list of connected Bluetooth devices for the given adapter."""
-    global object_manager, adapter
-    managed_objects = object_manager.GetManagedObjects()
+    """Returns a list of connected Bluetooth devices for the given ADAPTER."""
+    global OBJECT_MANAGER, ADAPTER
+    managed_objects = OBJECT_MANAGER.GetManagedObjects()
 
     connected_devices = {}
     
     # Loop through all managed objects and filter by device interface
     for path, interfaces in managed_objects.items():
-        if not path.startswith(adapter._path):
+        if not path.startswith(ADAPTER._path):
             continue
-
+        
         if "org.bluez.Device1" not in interfaces:
             continue
     
@@ -106,54 +184,51 @@ def get_devices(only_discovered=False):
         if alias == address:
             continue
 
-        connected_devices[alias] = device
+        battery = None
+        if "org.bluez.Battery1" in interfaces:
+            battery = interfaces["org.bluez.Battery1"]
+
+
+        connected_devices[alias] = {
+            "path": path,
+            "device": device,
+            "battery": battery
+        }
 
     return connected_devices
 
 
 def get_bluetooth_adapters():
     """Gets available Bluetooth adapters."""
-    global object_manager
-    managed_objects = object_manager.GetManagedObjects()
+    global OBJECT_MANAGER
+    managed_objects = OBJECT_MANAGER.GetManagedObjects()
 
-    adapters = []
+    adapters = {}
     for path, interfaces in managed_objects.items():
         if "org.bluez.Adapter1" in interfaces:
-            adapter = interfaces["org.bluez.Adapter1"]
-            name = adapter.get("Name", "Unknown Adapter")
-            adapters.append((name, path))  # Store name and path
+            ADAPTER = interfaces["org.bluez.Adapter1"]
+            name = ADAPTER.get("Name", ADAPTER.get("Address"))
+            adapters[name] = path
     return adapters
 
 
 def choose_adapter(adapters):
-    # TODO
-    """Uses dmenu to choose an adapter if there are multiple options."""
-    if len(adapters) > 1:
-        # Create a list of adapter names for dmenu (display only names)
-        adapter_names = [name for name, _ in adapters]
-        
-        # Use dmenu to prompt for the user's choice
-        selected_name = subprocess.run(
-            ["dmenu", "-p", "Select Bluetooth adapter:"],
-            input="\n".join(adapter_names),
-            capture_output=True,
-            text=True
-        ).stdout.strip()
-        
-        # Find the selected adapter's path
-        for name, path in adapters:
-            if name == selected_name:
-                return path
-    else:
-        # If only one adapter, return its path automatically
-        return adapters[0][1]
+    """Uses dmenu to choose an ADAPTER if there are multiple options."""
+    if len(adapters) == 1:
+        return next(iter(adapters.values()))
 
-    return None  # In case user cancels or no adapter is selected
+    # Use dmenu to prompt for the user's choice
+    selection = run_command("Choose bluetooth ADAPTER", "\n".join(adapters.keys()))
+    return adapters.get(selection, None)
 
 
 def scan():
-    global adapter, bus
-    adapter.StartDiscovery()
+    global ADAPTER, BUS
+    try:
+        ADAPTER.StartDiscovery()
+    except:
+        notify_send("Device scan failed")
+        return
     discovered_devices = {}
     standard_options = "Keep Searching\nAbort\n\n"
     while True:
@@ -173,83 +248,116 @@ def scan():
             continue
         break;
 
-    adapter.StopDiscovery()
-    path = f"{adapter._path}/dev_{discovered_devices[selection].get('Address').replace(':','_')}"
-    to_pair = bus.get("org.bluez", path)
+    ADAPTER.StopDiscovery()
+    if selection == "Abort" or len(selection) == 0:
+        return
     try:
+        to_pair = BUS.get("org.bluez", discovered_devices[selection]["path"])
         to_pair.Pair()
     except:
-        notify_send("Pairing device failed", to_pair.Alias)
+        notify_send("Pairing device failed", discovered_devices[selection]["device"].get("Alias"))
 
 
 def launch_gui():
-    if is_installed("blueman-manager"):
-        subprocess.run(["blueman-manager"], check=False)
-        sys.exit()
-    else:
-        notify_send("Blueman-manager not installed")
+    global CONFIG
 
+    app = CONFIG.get("manager", "app", fallback="blueman-manager")
+    gui = CONFIG.getboolean("manager", "gui", fallback=True)
+    print(gui)
+    terminal = CONFIG.get("manager", "terminal", fallback="kitty")
 
-def toggle_power():
-    global adapter
-    adapter.Powered = not adapter.Powered
-    notify_send(f"{'Enabled' if adapter.Powered else 'Disabled'} adapter {adapter.Alias}", "")
+    if not gui and not is_installed(terminal):
+        notify_send(f"{terminal} not found")
+        sys.exit(-1)
+    
+
+    if not is_installed(app):
+        notify_send(f"{app} not installed")
+        sys.exit(-1)
+
+    cmd = []
+    if not gui:
+        cmd.append(terminal)
+        cmd.append("-e")
+    cmd.append(app)
+    subprocess.run(cmd, check=False)
     sys.exit()
 
-def main():
-    global adapter, device, bus
+def toggle_power():
+    global ADAPTER
+    ADAPTER.Powered = not ADAPTER.Powered
+    notify_send(f"{'Enabled' if ADAPTER.Powered else 'Disabled'} ADAPTER {ADAPTER.Alias}", "")
+    sys.exit()
+
+
+def run():
+    global ADAPTER, DEVICE, BUS, CONFIG
     adapters = get_bluetooth_adapters()
 
     if not adapters:
-        print("No Bluetooth adapters found.")
+        notify_send("No bluetooth adapters found")
         return
 
-    # Select an adapter using dmenu if there are multiple options
-    selected_adapter_path = choose_adapter(adapters)
+    # Select an ADAPTER using dmenu if there are multiple options
+    adapter_path = choose_adapter(adapters)
+    if not adapter_path:
+        return
     
-    if selected_adapter_path:
-        print(f"Selected adapter: {selected_adapter_path}")
-        # You can then interact with the selected adapter, e.g., get its properties
-        adapter = SystemBus().get("org.bluez", selected_adapter_path)
-        print(f"Adapter Name: {adapter.Name}")
-    else:
-        print("No adapter selected.")
-        
-    adapter = bus.get('org.bluez', selected_adapter_path)
-
-
-    # loop until user exits
+    ADAPTER = BUS.get('org.bluez', adapter_path)
+    # lmain loop
     while True:
-        options = {
-            "Scan": scan,
-            f"{'Disable' if adapter.Powered else 'Enable'} Bluetooth": toggle_power,
-            "Launch Bluetooth Manager": launch_gui
-        }
 
         paired_devices = get_devices() 
-        device_names = "\n".join(fmt_device(name, device.get("Connected", False)) for name, device in paired_devices.items())
-        dmenu_input = f"{device_names}\n\n{'\n'.join(options)}\n\nExit"
-        selection = subprocess.run(create_dmenu_command(""),
-                            capture_output=True,
-                            check=False,
-                            input=dmenu_input,
-                            env=ENV,
-                            encoding=ENC).stdout 
-        selection = selection.strip("\n").split("\t")[-1]
+
+        options = [
+            Action(fmt_device(device), show_device_menu, [device["path"]]) for name, device in paired_devices.items()
+        ]
+        options.append(Action(""))
+        options.append(Action("Scan", scan))
+        options.append(Action(f"{'Disable' if ADAPTER.Powered else 'Enable'} Bluetooth", toggle_power))
+
+        display_gui = CONFIG.getboolean("manager", "enabled", fallback=False)
+        if display_gui: 
+            options.append(Action("Launch Bluetooth Manager", launch_gui))
+
+        options.append(Action(""))
+        options.append(Action("Exit", sys.exit))
+
+        dmenu_input = "\n".join(str(option) for option in options)
+        selection = run_command("", dmenu_input)
         if len(selection) == 0:
-            return 
-
-        if selection == "Exit":
-            return
-
-        if selection in options: 
-            options[selection]()
+            sys.exit()
+        selected = [action for action in options if str(action) == selection]
+        if len(selected) == 0:
             continue
+        selected[0]()        
+        DEVICE = None
 
-        device_path = f"{selected_adapter_path}/dev_{paired_devices[selection].get("Address").replace(':', '_')}"
-        device = bus.get('org.bluez', device_path)
-        show_device_menu()
-        device = None
+
+def create_parser():
+    parser = argparse.ArgumentParser(description="Bluetooth Manager Dmenu")
+    
+    # Add the optional --config or -c argument
+    parser.add_argument(
+        '--config', '-c',
+        type=str,
+        default=DEFAULT_CONFIG_PATH,  # Default path if not provided
+        help=f'Path to config file (default: {DEFAULT_CONFIG_PATH})'
+    )
+    
+    return parser
+
+
+def main():
+    global CONFIG
+    parser = create_parser()
+    args = parser.parse_args()
+    print(f"Using config file: {args.config}")
+    CONFIG.read(os.path.expanduser(args.config))
+
+    print(CONFIG.get("dmenu", "command", fallback="walker"))
+    run()
+
 
 if __name__ == "__main__":
     main()

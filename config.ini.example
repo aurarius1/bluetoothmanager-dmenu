@@ -1,0 +1,13 @@
+[dmenu]
+command: walker
+arguments: -n -d -k
+prompt: -p
+connected_symbol: 
+battery_symbol: 󰥈
+
+
+[manager]
+enabled: false
+app: blueman-manager
+gui: true 
+terminal: kitty
